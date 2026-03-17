@@ -2,13 +2,13 @@
 set -uo pipefail
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
-# ║  macOS Security Audit Tool v1.2                                             ║
+# ║  macOS Security Audit Tool v1.2.1                                           ║
 # ║  Comprehensive macOS security audit with HTML report                        ║
 # ║  Compatibility: macOS 12+ (Monterey), Intel & Apple Silicon                 ║
 # ║  VPN-aware | Outbound Firewall-aware | Privacy Browser-aware                ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
-SCRIPT_VERSION="1.2.0"
+SCRIPT_VERSION="1.2.1"
 AUDIT_DATE=$(date "+%Y-%m-%d %H:%M:%S")
 AUDIT_TIMESTAMP=$(date "+%Y%m%d_%H%M%S")
 HOSTNAME_VAL=$(hostname)
@@ -55,7 +55,7 @@ SAFE_PUBLIC_DNS=("1.1.1.1" "1.0.0.1" "9.9.9.9" "149.112.112.112" "208.67.222.222
 print_banner() {
     echo ""
     echo -e "${BOLD}${CYAN}╔══════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${BOLD}${CYAN}║       macOS Security Audit Tool v${SCRIPT_VERSION}                  ║${NC}"
+    echo -e "${BOLD}${CYAN}║       macOS Security Audit Tool v${SCRIPT_VERSION}                ║${NC}"
     echo -e "${BOLD}${CYAN}╠══════════════════════════════════════════════════════════╣${NC}"
     echo -e "${CYAN}║  ${NC}${DIM}Host:${NC}  ${HOSTNAME_VAL}"
     echo -e "${CYAN}║  ${NC}${DIM}macOS:${NC} ${MACOS_VERSION} (${MACOS_BUILD})"
@@ -123,11 +123,26 @@ is_safe_dns() {
     return 1
 }
 
-# Безопасное чтение defaults — возвращает "NOT_SET" если ключ не найден
 read_default() {
     local val
     val=$(defaults read "$@" 2>/dev/null) || val="NOT_SET"
     echo "$val"
+}
+
+# Проверка вывода socketfilterfw: macOS возвращает разные строки в зависимости от State
+# State=0: "disabled"
+# State=1: "enabled"  
+# State=2: "blocking all non-essential incoming connections"
+# Stealth: "stealth mode is on" / "stealth mode is off"
+# Поэтому проверяем на ОТСУТСТВИЕ "disabled" и "off" вместо наличия "enabled"
+fw_is_on() {
+    local output="$1"
+    if [[ -z "$output" ]]; then return 1; fi
+    # Если содержит "disabled" или "is off" — выключено
+    if echo "$output" | grep -qi "disabled\|is off"; then return 1; fi
+    # Если содержит "enabled" или "blocking" или "is on" — включено
+    if echo "$output" | grep -qi "enabled\|blocking\|is on"; then return 0; fi
+    return 1
 }
 
 request_sudo() {
@@ -231,23 +246,29 @@ check_system_integrity() {
 check_network_security() {
     print_section "2" "NETWORK SECURITY"
 
+    # ── Firewall checks ──
+    # macOS socketfilterfw возвращает разные строки:
+    #   --getglobalstate: "enabled. (State = 1)" / "blocking all... (State = 2)" / "disabled. (State = 0)"
+    #   --getstealthmode: "stealth mode is on" / "stealth mode is off"
+    #   --getblockall: "blocking all non-essential..." / "Disabled..."
+    # Используем fw_is_on() для надёжного парсинга
     if [[ "$HAS_SUDO" == true ]]; then
-        local fw; fw=$(sudo /usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate 2>/dev/null || echo "")
-        if echo "$fw" | grep -q "enabled"; then
+        local fw_out; fw_out=$(sudo /usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate 2>/dev/null || echo "")
+        if fw_is_on "$fw_out"; then
             record_check "Network Security" "Application Firewall" "PASS" "Firewall enabled" "" 4
         else
             record_check "Network Security" "Application Firewall" "FAIL" "Firewall disabled" "sudo /usr/libexec/ApplicationFirewall/socketfilterfw --setglobalstate on" 4
         fi
 
-        local st; st=$(sudo /usr/libexec/ApplicationFirewall/socketfilterfw --getstealthmode 2>/dev/null || echo "")
-        if echo "$st" | grep -q "enabled"; then
+        local st_out; st_out=$(sudo /usr/libexec/ApplicationFirewall/socketfilterfw --getstealthmode 2>/dev/null || echo "")
+        if fw_is_on "$st_out"; then
             record_check "Network Security" "Firewall Stealth Mode" "PASS" "Stealth Mode enabled" "" 3
         else
             record_check "Network Security" "Firewall Stealth Mode" "FAIL" "Stealth Mode disabled — Mac responds to ping/port scan" "sudo /usr/libexec/ApplicationFirewall/socketfilterfw --setstealthmode on" 3
         fi
 
-        local ba; ba=$(sudo /usr/libexec/ApplicationFirewall/socketfilterfw --getblockall 2>/dev/null || echo "")
-        if echo "$ba" | grep -q "enabled"; then
+        local ba_out; ba_out=$(sudo /usr/libexec/ApplicationFirewall/socketfilterfw --getblockall 2>/dev/null || echo "")
+        if fw_is_on "$ba_out"; then
             record_check "Network Security" "Block All Incoming" "PASS" "All incoming blocked" "" 2
         else
             record_check "Network Security" "Block All Incoming" "WARN" "Service exceptions allowed" "sudo /usr/libexec/ApplicationFirewall/socketfilterfw --setblockall on" 2
@@ -258,7 +279,7 @@ check_network_security() {
         record_check "Network Security" "Block All Incoming" "SKIP" "Requires sudo" "" 2
     fi
 
-    # VPN
+    # ── VPN ──
     local vpn_tunnel; vpn_tunnel=$(ifconfig 2>/dev/null | grep -c "utun" || echo "0")
     local detected_vpn; detected_vpn=$(detect_vpn)
 
@@ -270,7 +291,7 @@ check_network_security() {
         record_check "Network Security" "VPN Tunnel" "WARN" "No VPN — traffic visible to ISP. Recommended: Mullvad, ProtonVPN, IVPN" "https://mullvad.net or https://protonvpn.com" 5
     fi
 
-    # DNS
+    # ── DNS ──
     local dns_servers; dns_servers=$(scutil --dns 2>/dev/null | grep "nameserver\[" | awk '{print $3}' | sort -u)
     local unsafe_dns=()
     local vpn_dns_found=false
@@ -305,7 +326,7 @@ check_network_security() {
         fi
     fi
 
-    # Default route
+    # ── Default route ──
     local dr; dr=$(route -n get default 2>/dev/null | grep "interface:" | awk '{print $2}' || echo "")
     if [[ "$dr" == utun* ]]; then
         record_check "Network Security" "Default Route via VPN" "PASS" "Default route through VPN (${dr})" "" 4
@@ -315,7 +336,7 @@ check_network_security() {
         record_check "Network Security" "Default Route" "WARN" "Route: ${dr} — no VPN, traffic visible to ISP" "" 3
     fi
 
-    # Outbound Firewall
+    # ── Outbound Firewall ──
     local obfw_found=false obfw_name="" obfw_running=false
     if [[ -d "/Applications/LuLu.app" ]]; then
         obfw_found=true; obfw_name="LuLu"
@@ -333,7 +354,7 @@ check_network_security() {
         record_check "Network Security" "Outbound Firewall" "WARN" "No outbound firewall. Recommended: LuLu (free) or Little Snitch" "https://objective-see.org/products/lulu.html" 3
     fi
 
-    # Sharing
+    # ── Sharing ──
     local sharing_services=("Remote Login:ssh" "Screen Sharing:screensharing" "File Sharing:smb" "Remote Management:remotemanagement" "Printer Sharing:printersharing" "Content Caching:contentcaching" "Remote Apple Events:remoteappleevents")
     for sp in "${sharing_services[@]}"; do
         local dn="${sp%%:*}" sn="${sp##*:}" is_on=false
@@ -356,7 +377,7 @@ check_network_security() {
         fi
     done
 
-    # AirDrop
+    # ── AirDrop ──
     local ad; ad=$(read_default com.apple.sharingd DiscoverableMode)
     if [[ "$ad" == "Off" ]]; then
         record_check "Network Security" "AirDrop" "PASS" "AirDrop off" "" 2
@@ -366,7 +387,7 @@ check_network_security() {
         record_check "Network Security" "AirDrop" "WARN" "AirDrop open to everyone" "defaults write com.apple.sharingd DiscoverableMode -string 'Contacts Only'" 2
     fi
 
-    # Bluetooth
+    # ── Bluetooth ──
     local bt; bt=$(read_default /Library/Preferences/com.apple.Bluetooth ControllerPowerState)
     if [[ "$bt" == "0" ]]; then
         record_check "Network Security" "Bluetooth" "PASS" "Bluetooth off" "" 1
@@ -374,7 +395,7 @@ check_network_security() {
         record_check "Network Security" "Bluetooth" "WARN" "Bluetooth on — turn off when not in use" "" 1
     fi
 
-    # Wi-Fi
+    # ── Wi-Fi ──
     local nc; nc=$(networksetup -listpreferredwirelessnetworks en0 2>/dev/null | tail -n +2 | grep -c "." 2>/dev/null || echo "0")
     if [[ "$nc" -gt 10 ]]; then
         record_check "Network Security" "Wi-Fi: Saved Networks" "WARN" "${nc} saved — remove unused (evil twin risk)" "networksetup -removepreferredwirelessnetwork en0 'NAME'" 2
@@ -439,7 +460,7 @@ check_privacy_controls() {
     if [[ "$val" == "0" ]]; then
         record_check "Privacy Controls" "Safari Suggestions" "PASS" "Disabled" "" 1
     else
-        record_check "Privacy Controls" "Safari Suggestions" "WARN" "Sends queries to Apple" "defaults write com.apple.Safari UniversalSearchEnabled -bool false" 1
+        record_check "Privacy Controls" "Safari Suggestions" "WARN" "May send queries to Apple" "System Settings → Safari → Search → disable Suggestions" 1
     fi
 
     if [[ "$HAS_SUDO" == true ]]; then
@@ -455,7 +476,6 @@ check_privacy_controls() {
         record_check "Privacy Controls" "Location Services" "SKIP" "Requires sudo" "" 2
     fi
 
-    # Privacy browsers
     local pb=()
     [[ -d "/Applications/DuckDuckGo.app" ]] && pb+=("DuckDuckGo")
     [[ -d "/Applications/Firefox.app" ]] && pb+=("Firefox")
@@ -549,7 +569,7 @@ check_access_auth() {
         record_check "Access & Auth" "Remote Login (SSH)" "SKIP" "Requires sudo" "" 3
     fi
 
-    record_check "Access & Auth" "Sudo Timeout" "WARN" "Default 5 min — consider reducing" "visudo: Defaults timestamp_timeout=1" 1
+    record_check "Access & Auth" "Sudo Timeout" "WARN" "Default 5 min — consider reducing to 1 min" "echo 'Defaults timestamp_timeout=1' | sudo tee /etc/sudoers.d/timeout >/dev/null" 1
 
     if nvram -x -p 2>/dev/null | grep -q "fmm-mobileme-token-FMM"; then
         record_check "Access & Auth" "Find My Mac" "PASS" "Enabled" "" 3
@@ -564,7 +584,6 @@ check_access_auth() {
 check_application_security() {
     print_section "5" "APPLICATION SECURITY"
 
-    # Launch Agents / Daemons
     local dirs=("${HOME}/Library/LaunchAgents:User Launch Agents" "/Library/LaunchAgents:System Launch Agents" "/Library/LaunchDaemons:System Launch Daemons")
     for dp in "${dirs[@]}"; do
         local dir="${dp%%:*}" label="${dp##*:}"
@@ -598,7 +617,6 @@ check_application_security() {
         record_check "Application Security" "Gatekeeper Bypass" "PASS" "Gatekeeper active" "" 4
     fi
 
-    # Security tools
     local ot=()
     [[ -d "/Applications/LuLu.app" ]] && ot+=("LuLu")
     [[ -d "/Applications/BlockBlock Helper.app" || -d "/Applications/BlockBlock.app" ]] && ot+=("BlockBlock")
@@ -692,10 +710,10 @@ check_performance_health() {
 # TCC
 # ══════════════════════════════════════════════════════════════════════════════
 check_tcc_permissions() {
-    [[ "$HAS_SUDO" != true ]] && return
+    if [[ "$HAS_SUDO" != true ]]; then return; fi
     print_section "+" "TCC PERMISSIONS AUDIT"
     local tcc="/Library/Application Support/com.apple.TCC/TCC.db"
-    [[ ! -f "$tcc" ]] && return
+    if [[ ! -f "$tcc" ]]; then return; fi
 
     local svcs=("kTCCServiceCamera:Camera" "kTCCServiceMicrophone:Microphone" "kTCCServiceScreenCapture:Screen Recording" "kTCCServiceSystemPolicyAllFiles:Full Disk Access" "kTCCServiceAccessibility:Accessibility" "kTCCServiceListenEvent:Input Monitoring")
     for sp in "${svcs[@]}"; do
@@ -719,7 +737,7 @@ calculate_score() {
     for ((i=0; i<${#RESULTS_STATUS[@]}; i++)); do
         local s="${RESULTS_STATUS[$i]}"
         local w="${RESULTS_WEIGHT[$i]}"
-        [[ "$s" == "SKIP" ]] && continue
+        if [[ "$s" == "SKIP" ]]; then continue; fi
         tw=$((tw + w))
         if [[ "$s" == "PASS" ]]; then ew=$((ew + w)); fi
         if [[ "$s" == "WARN" ]]; then ew=$((ew + w / 2)); fi
@@ -757,7 +775,7 @@ HTMLTOP
         local fx; fx=$(html_escape "${RESULTS_FIX[$i]}")
 
         if [[ "$ct" != "$cc" ]]; then
-            [[ -n "$cc" ]] && echo "</div>" >> "$REPORT_FILE"
+            if [[ -n "$cc" ]]; then echo "</div>" >> "$REPORT_FILE"; fi
             cc="$ct"; snum=$((snum+1))
             echo "<div class=\"sec\"><div class=\"sh\"><span class=\"snm\">${snum}</span><h2>${ct}</h2></div>" >> "$REPORT_FILE"
         fi
@@ -770,7 +788,7 @@ HTMLTOP
         fi
         echo "</div></div>" >> "$REPORT_FILE"
     done
-    [[ -n "$cc" ]] && echo "</div>" >> "$REPORT_FILE"
+    if [[ -n "$cc" ]]; then echo "</div>" >> "$REPORT_FILE"; fi
 
     if [[ ${#QUICK_FIXES[@]} -gt 0 ]]; then
         echo '<div class="qf"><h2>⚡ Quick Fix</h2><div class="qb" onclick="navigator.clipboard.writeText(this.innerText.trim())">' >> "$REPORT_FILE"
@@ -803,11 +821,22 @@ HTMLBOT
 
 # ══════════════════════════════════════════════════════════════════════════════
 main() {
-    clear; print_banner; HAS_SUDO=false; request_sudo
-    echo ""; echo -e "${BOLD}Running audit...${NC}"
-    check_system_integrity; check_network_security; check_privacy_controls
-    check_access_auth; check_application_security; check_performance_health; check_tcc_permissions
-    echo ""; echo -e "${BOLD}${CYAN}Generating HTML report...${NC}"; generate_html_report
+    clear
+    print_banner
+    HAS_SUDO=false
+    request_sudo
+    echo ""
+    echo -e "${BOLD}Running audit...${NC}"
+    check_system_integrity
+    check_network_security
+    check_privacy_controls
+    check_access_auth
+    check_application_security
+    check_performance_health
+    check_tcc_permissions
+    echo ""
+    echo -e "${BOLD}${CYAN}Generating HTML report...${NC}"
+    generate_html_report
     local score; score=$(calculate_score)
     echo ""
     echo -e "${BOLD}${CYAN}══════════════════════════════════════════════════════════${NC}"
@@ -816,8 +845,11 @@ main() {
     echo -e "  Security Score: ${BOLD}${score}/100${NC}"
     echo -e "  ${GREEN}PASS: ${PASS_COUNT}${NC}  ${RED}FAIL: ${FAIL_COUNT}${NC}  ${YELLOW}WARN: ${WARN_COUNT}${NC}  ${DIM}SKIP: ${SKIP_COUNT}${NC}"
     echo -e "  Total checks: ${TOTAL_CHECKS}"
-    echo -e "  HTML report: ${BOLD}${REPORT_FILE}${NC}"; echo ""
+    echo -e "  HTML report: ${BOLD}${REPORT_FILE}${NC}"
+    echo ""
     open "$REPORT_FILE" 2>/dev/null || true
-    [[ -n "${SUDO_KEEPER_PID:-}" ]] && kill "$SUDO_KEEPER_PID" 2>/dev/null || true
+    if [[ -n "${SUDO_KEEPER_PID:-}" ]]; then
+        kill "$SUDO_KEEPER_PID" 2>/dev/null || true
+    fi
 }
 main "$@"
