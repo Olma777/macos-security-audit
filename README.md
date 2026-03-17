@@ -27,8 +27,8 @@ The script is **read-only** — it checks settings but changes nothing. All fix 
 | Category | Checks |
 |---|---|
 | **System Integrity** | SIP, FileVault, Gatekeeper, XProtect, Rapid Security Responses, auto-updates, EFI integrity (Intel) / Secure Boot (Apple Silicon) |
-| **Network Security** | Application Firewall + Stealth Mode, VPN tunnel & DNS leak detection, outbound firewall (LuLu), 7 sharing services (SSH, File Sharing, Screen Sharing, etc.), AirDrop, Bluetooth, Wi-Fi known networks |
-| **Privacy Controls** | Apple Analytics, Crash Reporter, personalized ads, Siri & Siri Data Sharing, Spotlight Suggestions, Safari Suggestions, Location Services, privacy-focused browser detection, telemetry-heavy browser detection |
+| **Network Security** | Application Firewall + Stealth Mode, VPN tunnel detection (any VPN), DNS leak check, default route analysis, outbound firewall (LuLu / Little Snitch), 7 sharing services, AirDrop, Bluetooth, Wi-Fi saved networks |
+| **Privacy Controls** | Apple Analytics, Crash Reporter, personalized ads, Siri & Siri Data Sharing, Spotlight Suggestions, Safari Suggestions, Location Services, privacy browser detection, telemetry-heavy browser detection |
 | **Access & Auth** | Screensaver/sleep password & delay, auto-login, password hints, login window config, display sleep timeout, SSH, sudo timeout, Find My Mac |
 | **Application Security** | Launch Agents & Daemons audit (3 levels with trusted whitelist), Login Items, Gatekeeper bypass check, quarantine flags, security tool detection |
 | **Performance & Health** | Memory pressure, swap, disk space, user caches, APFS snapshots, battery health & cycle count, optimized charging, uptime |
@@ -45,7 +45,7 @@ The script is **read-only** — it checks settings but changes nothing. All fix 
 
 ```bash
 # Download
-curl -sL https://raw.githubusercontent.com/YOUR_USERNAME/macos-security-audit/main/macos_security_audit.sh -o macos_security_audit.sh
+curl -sL https://raw.githubusercontent.com/Olma777/macos-security-audit/main/macos_security_audit.sh -o macos_security_audit.sh
 
 # Make executable
 chmod +x macos_security_audit.sh
@@ -57,7 +57,7 @@ chmod +x macos_security_audit.sh
 Or clone the repo:
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/macos-security-audit.git
+git clone https://github.com/Olma777/macos-security-audit.git
 cd macos-security-audit
 chmod +x macos_security_audit.sh
 ./macos_security_audit.sh
@@ -78,15 +78,19 @@ The report is a single self-contained HTML file — no external dependencies, wo
 
 ## VPN & Security Tool Awareness
 
-The script is designed for security-conscious users who run VPN and third-party security tools:
+The script auto-detects your security setup and adapts accordingly:
 
-**Mullvad VPN** — Verifies VPN tunnel is active (utun interface), checks DNS servers against known Mullvad DNS ranges (10.64.0.1, 100.64.0.*), validates default route goes through VPN, does not flag Mullvad processes as suspicious.
+**VPN Detection** — Auto-detects any active VPN tunnel (utun interface) and identifies the VPN client: Mullvad, NordVPN, ExpressVPN, ProtonVPN, WireGuard, OpenVPN, Surfshark, Cloudflare WARP, and others. If no VPN is found, recommends no-log VPN providers.
 
-**LuLu (Objective-See)** — Checks if LuLu outbound firewall is installed and running. macOS has no built-in outbound firewall — LuLu fills that gap. Whitelisted in Launch Agent/Daemon audit.
+**DNS Leak Check** — Compares active DNS servers against known VPN DNS ranges and privacy-friendly public DNS (Cloudflare 1.1.1.1, Quad9 9.9.9.9, OpenDNS). Flags ISP DNS as a potential leak.
 
-**DuckDuckGo Browser** — Detects installation as a privacy-positive signal. Also flags browsers with elevated telemetry (Chrome, Edge, Opera) as a warning.
+**Outbound Firewall** — Detects LuLu and Little Snitch. If neither is found, recommends installing one (macOS has no built-in outbound firewall).
 
-**Objective-See Tools** — Detects BlockBlock, KnockKnock, OverSight, RansomWhere? and reports their presence.
+**Privacy Browsers** — Detects DuckDuckGo, Firefox, Brave, LibreWolf, Tor Browser as positive signals. Flags Chrome, Edge, Opera, Yandex as high-telemetry browsers.
+
+**Security Tools** — Detects Objective-See tools (LuLu, BlockBlock, KnockKnock, OverSight, RansomWhere?) and reports their presence.
+
+**Trusted Whitelist** — VPN processes, security tools, and Apple services are whitelisted in Launch Agent/Daemon audits to avoid false positives.
 
 ## Safety
 
